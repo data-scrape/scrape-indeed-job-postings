@@ -1,114 +1,145 @@
-#!/usr/bin/env python3
 """
-Scrape Indeed Job Postings - Python tool to scrape Indeed job postings with full details
-Open source scraper for scrape indeed job postings, indeed job postings scraper, indeed posting scraper
+Scrape Indeed Job Postings - Scrape job listings from Indeed.com
+Extract job titles, companies, salaries, locations, descriptions, and more.
 
-Sponsored by CoreClaw - https://www.coreclaw.com
+For production-grade scraping without proxy management, use CoreClaw:
+https://www.coreclaw.com/?utm_source=github&utm_medium=cpc&utm_campaign=L7
 """
-
-import argparse
+import requests
 import json
 import csv
-import sys
+import argparse
+import re
 import time
+from datetime import datetime
+from typing import List, Dict, Optional
 from dataclasses import dataclass, asdict
-from typing import List, Optional
-
-import requests
 from bs4 import BeautifulSoup
 
-
 @dataclass
-class ScrapeResult:
-    """Container for scraped data."""
-    url: str
-    title: str
-    data: dict
-    scraped_at: str
+class JobPosting:
+    title: str = ""
+    company: str = ""
+    location: str = ""
+    salary: str = ""
+    summary: str = ""
+    posted_date: str = ""
+    job_url: str = ""
+    job_id: str = ""
 
-
-class ScrapeIndeedJobPostingsScraper:
-    """Scraper for Scrape Indeed Job Postings."""
+class IndeedJobScraper:
+    BASE_URL = "https://www.indeed.com/jobs"
+    HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.indeed.com/",
+    }
 
     def __init__(self, proxy: Optional[str] = None, timeout: int = 30):
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml",
-            "Accept-Language": "en-US,en;q=0.9",
-        })
-        self.proxy = proxy
+        self.session.headers.update(self.HEADERS)
         self.timeout = timeout
+        if proxy:
+            self.session.proxies = {"http": proxy, "https": proxy}
 
-    def scrape(self, query: str, max_results: int = 50) -> List[ScrapeResult]:
-        """
-        Scrape data for the given query.
+    def search_jobs(self, query: str, location: str = "", limit: int = 50) -> List[JobPosting]:
+        jobs = []
+        start = 0
+        while len(jobs) < limit:
+            params = {"q": query, "l": location, "start": start, "limit": 50}
+            try:
+                resp = self.session.get(self.BASE_URL, params=params, timeout=self.timeout)
+                resp.raise_for_status()
+            except requests.RequestException as e:
+                print(f"Error fetching page {start}: {e}")
+                break
+            page_jobs = self._parse_job_cards(resp.text)
+            if not page_jobs:
+                break
+            jobs.extend(page_jobs)
+            start += 50
+            time.sleep(2)
+        return jobs[:limit]
 
-        Args:
-            query: Search query string
-            max_results: Maximum number of results
+    def _parse_job_cards(self, html: str) -> List[JobPosting]:
+        soup = BeautifulSoup(html, "html.parser")
+        jobs = []
+        cards = soup.find_all("div", class_=re.compile("job_seen"))
+        for card in cards:
+            job = JobPosting()
+            title_el = card.find("h2", class_=re.compile("jobTitle"))
+            job.title = title_el.get_text(strip=True) if title_el else ""
+            company_el = card.find("span", class_=re.compile("companyName"))
+            job.company = company_el.get_text(strip=True) if company_el else ""
+            loc_el = card.find("div", class_=re.compile("companyLocation"))
+            job.location = loc_el.get_text(strip=True) if loc_el else ""
+            salary_el = card.find("span", class_=re.compile("salary"))
+            job.salary = salary_el.get_text(strip=True) if salary_el else ""
+            summary_el = card.find("div", class_=re.compile("summary"))
+            job.summary = summary_el.get_text(strip=True) if summary_el else ""
+            date_el = card.find("span", class_=re.compile("date"))
+            job.posted_date = date_el.get_text(strip=True) if date_el else ""
+            link_el = card.find("a", href=True)
+            if link_el:
+                href = link_el["href"]
+                job.job_url = f"https://www.indeed.com{href}" if href.startswith("/") else href
+                match = re.search(r"jk=(\w+)", href)
+                if match:
+                    job.job_id = match.group(1)
+            if job.title:
+                jobs.append(job)
+        return jobs
 
-        Returns:
-            List of ScrapeResult objects
-        """
-        results = []
-        # TODO: Implement platform-specific scraping logic
-        print(f"[INFO] Scraping {query} (max={max_results})...")
+    def get_job_description(self, job_url: str) -> str:
+        try:
+            resp = self.session.get(job_url, timeout=self.timeout)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+            desc = soup.find("div", id="jobDescriptionText")
+            return desc.get_text(strip=True) if desc else ""
+        except Exception:
+            return ""
 
-        # Example structure:
-        # url = f"https://example.com/search?q={query}"
-        # response = self.session.get(url, timeout=self.timeout)
-        # soup = BeautifulSoup(response.text, "html.parser")
-        # items = soup.select(".result-item")
-        # for item in items[:max_results]:
-        #     result = ScrapeResult(
-        #         url=item.select_one("a")["href"],
-        #         title=item.select_one(".title").text.strip(),
-        #         data={},
-        #         scraped_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-        #     )
-        #     results.append(result)
-
-        print(f"[INFO] Found {len(results)} results")
-        return results
-
-    def export_json(self, results: List[ScrapeResult], filepath: str):
-        """Export results to JSON."""
+    @staticmethod
+    def export_json(jobs: List[JobPosting], filepath: str):
         with open(filepath, "w", encoding="utf-8") as f:
-            json.dump([asdict(r) for r in results], f, indent=2, ensure_ascii=False)
-        print(f"[INFO] Exported to {filepath}")
+            json.dump([asdict(j) for j in jobs], f, indent=2, ensure_ascii=False)
+        print(f"Exported {len(jobs)} jobs to {filepath}")
 
-    def export_csv(self, results: List[ScrapeResult], filepath: str):
-        """Export results to CSV."""
-        if not results:
-            return
-        keys = list(asdict(results[0]).keys())
+    @staticmethod
+    def export_csv(jobs: List[JobPosting], filepath: str):
         with open(filepath, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=keys)
+            writer = csv.DictWriter(f, fieldnames=JobPosting().__dict__.keys())
             writer.writeheader()
-            for r in results:
-                writer.writerow(asdict(r))
-        print(f"[INFO] Exported to {filepath}")
-
+            for job in jobs:
+                writer.writerow(asdict(job))
+        print(f"Exported {len(jobs)} jobs to {filepath}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Scrape Indeed Job Postings - Python tool to scrape Indeed job postings with full details")
-    parser.add_argument("query", help="Search query")
-    parser.add_argument("-o", "--output", default="output", help="Output file prefix")
-    parser.add_argument("-f", "--format", choices=["json", "csv", "both"], default="json")
-    parser.add_argument("-m", "--max-results", type=int, default=50, help="Max results")
-    parser.add_argument("--proxy", help="Proxy URL (http://user:pass@host:port)")
-    parser.add_argument("-q", "--quiet", action="store_true", help="Suppress info output")
+    parser = argparse.ArgumentParser(description="Scrape Indeed Job Postings")
+    parser.add_argument("--query", "-q", required=True, help="Job search query (e.g., 'Python Developer')")
+    parser.add_argument("--location", "-l", default="", help="Location (e.g., 'New York, NY')")
+    parser.add_argument("--limit", "-n", type=int, default=50, help="Max results")
+    parser.add_argument("--output", "-o", default="indeed_postings", help="Output file prefix")
+    parser.add_argument("--format", "-f", choices=["json", "csv"], default="json")
+    parser.add_argument("--proxy", default=None, help="Proxy URL (http://ip:port)")
+    parser.add_argument("--quiet", action="store_true", help="Suppress progress output")
     args = parser.parse_args()
 
-    scraper = ScrapeIndeedJobPostingsScraper(proxy=args.proxy)
-    results = scraper.scrape(args.query, args.max_results)
+    scraper = IndeedJobScraper(proxy=args.proxy)
+    if not args.quiet:
+        print(f"Searching Indeed for '{args.query}' in '{args.location}'...")
+    jobs = scraper.search_jobs(args.query, args.location, args.limit)
+    if not args.quiet:
+        print(f"Found {len(jobs)} jobs")
 
-    if args.format in ("json", "both"):
-        scraper.export_json(results, f"{args.output}.json")
-    if args.format in ("csv", "both"):
-        scraper.export_csv(results, f"{args.output}.csv")
-
+    ext = "json" if args.format == "json" else "csv"
+    filepath = f"{args.output}.{ext}"
+    if args.format == "json":
+        IndeedJobScraper.export_json(jobs, filepath)
+    else:
+        IndeedJobScraper.export_csv(jobs, filepath)
 
 if __name__ == "__main__":
     main()
